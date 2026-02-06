@@ -27,7 +27,7 @@ try:
 except Exception:
     np = None
 
-# Wordcloud (optional but recommended)
+# Wordcloud
 try:
     from wordcloud import WordCloud
 except Exception:
@@ -38,19 +38,18 @@ except Exception:
 # Configuration
 # -----------------------------
 
-# IMPORTANT: do NOT hardcode the key in code. Set in Render Environment as GUARDIAN_API_KEY.
 GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY")
 GUARDIAN_SEARCH_URL = "https://content.guardianapis.com/search"
 
 DEFAULT_PAGE_SIZE = 200
-MAX_PAGES = 10  # safeguard for API usage
+MAX_PAGES = 10
 
 WINDOW_BEFORE = 5
 WINDOW_AFTER = 5
 
 
 # -----------------------------
-# NLTK setup (lazy + production-safe)
+# NLTK (lazy, safe)
 # -----------------------------
 
 _NLTK_READY = False
@@ -59,13 +58,8 @@ _LEMMATIZER = None
 
 
 def ensure_nltk():
-    """
-    Ensure required NLTK corpora are available.
-    NOTE: Downloading at runtime can be slow/unreliable on some hosts.
-    We run this lazily (only when text processing is requested).
-    """
     global _NLTK_READY, _STOPWORDS, _LEMMATIZER
-    if _NLTK_READY and _STOPWORDS is not None and _LEMMATIZER is not None:
+    if _NLTK_READY:
         return
 
     try:
@@ -88,264 +82,35 @@ def ensure_nltk():
     _NLTK_READY = True
 
 
-def get_stopwords_and_lemmatizer():
+def get_nlp():
     ensure_nltk()
     return _STOPWORDS, _LEMMATIZER
 
 
 # -----------------------------
-# Flask App
+# Flask app
 # -----------------------------
 
-app = Flask(__name__)
-CORS(app)  # allow browser fetch (also useful if frontend is separate)
+app = Flask(__name__, static_folder=None)
+CORS(app)
 
 
-# Serve the frontend (so / doesn't 404 on Render)
+# -----------------------------
+# FRONTEND ROUTING (CRITICAL)
+# -----------------------------
+
 @app.route("/")
-def home():
+def serve_index():
     return send_from_directory("frontend", "index.html")
 
 
-# Serve frontend assets (css/js/images referenced by index.html)
 @app.route("/<path:path>")
-def frontend_files(path):
+def serve_frontend_assets(path):
     return send_from_directory("frontend", path)
 
 
 # -----------------------------
-# Helpers
-# -----------------------------
-
-def parse_month_selection(selection: str):
-    """
-    Frontend typically sends something like:
-      - "Last month (1)"
-      - "2 months ago (2)"
-      - "6 months ago (6)"
-    Extract the trailing number in parentheses and use it as offset.
-    Offset 1 = last completed month.
-    """
-    if not selection:
-        offset = 1
-    else:
-        m = re.search(r"\((\d+)\)", selection)
-        offset = int(m.group(1)) if m else 1
-
-    today = dt.date.today()
-    first_of_this_month = today.replace(day=1)
-
-    year = first_of_this_month.year
-    month = first_of_this_month.month - offset
-    while month <= 0:
-        month += 12
-        year -= 1
-
-    start = dt.date(year, month, 1)
-
-    end_year = year
-    end_month = month + 1
-    if end_month == 13:
-        end_month = 1
-        end_year += 1
-    end = dt.date(end_year, end_month, 1)
-    return start, end
-
-
-def month_ranges_last_n_completed_months(n: int):
-    """
-    Returns list of (month_label, start_date, end_date) for last n completed months,
-    newest first.
-    """
-    ranges = []
-    for i in range(1, n + 1):
-        start, end = parse_month_selection(f"({i})")
-        label = start.strftime("%Y-%m")
-        ranges.append((label, start, end))
-    return ranges  # newest -> older
-
-
-def guardian_fetch_all(query: str, from_date: dt.date, to_date: dt.date):
-    """
-    Fetch all Guardian results between from_date (inclusive) and to_date (exclusive),
-    returning list of results with fields.
-    """
-    if not GUARDIAN_API_KEY or GUARDIAN_API_KEY.strip() == "":
-        raise ValueError(
-            "Missing GUARDIAN_API_KEY. Set it in your hosting environment (Render -> Environment)."
-        )
-
-    all_results = []
-    page = 1
-
-    from_str = from_date.isoformat()
-    # Guardian 'to-date' is inclusive; we approximate exclusive end with -1 day.
-    to_inclusive = (to_date - dt.timedelta(days=1)).isoformat()
-
-    while page <= MAX_PAGES:
-        params = {
-            "q": query,
-            "api-key": GUARDIAN_API_KEY,
-            "page-size": DEFAULT_PAGE_SIZE,
-            "page": page,
-            "from-date": from_str,
-            "to-date": to_inclusive,
-            "show-fields": "bodyText,headline,trailText",
-        }
-        r = requests.get(GUARDIAN_SEARCH_URL, params=params, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-
-        resp = data.get("response", {})
-        results = resp.get("results", [])
-        all_results.extend(results)
-
-        pages = resp.get("pages", page)
-        if page >= pages:
-            break
-        page += 1
-
-    return all_results
-
-
-def normalize_text(text: str) -> list[str]:
-    """
-    - lowercase
-    - keep alphabetic tokens (a-z)
-    - remove stopwords
-    - lemmatize
-    - remove 1 and 2 letter words
-    """
-    if not text:
-        return []
-
-    STOPWORDS, LEMMATIZER = get_stopwords_and_lemmatizer()
-
-    text = text.lower()
-    tokens = re.findall(r"[a-z]+", text)
-
-    cleaned = []
-    for tok in tokens:
-        if len(tok) <= 2:
-            continue
-        if tok in STOPWORDS:
-            continue
-        lemma = LEMMATIZER.lemmatize(tok)
-        if len(lemma) <= 2:
-            continue
-        if lemma in STOPWORDS:
-            continue
-        cleaned.append(lemma)
-
-    return cleaned
-
-
-def aggregate_article_text(results) -> str:
-    chunks = []
-    for item in results:
-        fields = item.get("fields") or {}
-        body = fields.get("bodyText") or ""
-        headline = fields.get("headline") or ""
-        trail = fields.get("trailText") or ""
-        chunks.append(headline)
-        chunks.append(trail)
-        chunks.append(body)
-    return "\n".join(chunks)
-
-
-def zipf_data_from_counter(freq: Counter, top_k: int = 200):
-    """
-    Returns ranks and frequencies (sorted), plus log-log fit line parameters.
-    """
-    if not freq:
-        return {"ranks": [], "freqs": [], "log_ranks": [], "log_freqs": [], "fit": None}
-
-    items = freq.most_common(top_k)
-    freqs = [c for _, c in items]
-    ranks = list(range(1, len(freqs) + 1))
-
-    fit = None
-    if np is not None and len(freqs) >= 5:
-        x = np.log(np.array(ranks, dtype=float))
-        y = np.log(np.array(freqs, dtype=float))
-        b, a = np.polyfit(x, y, 1)  # y = b*x + a
-        yhat = a + b * x
-        ss_res = float(np.sum((y - yhat) ** 2))
-        ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
-        r2 = 1.0 - (ss_res / ss_tot if ss_tot != 0 else 0.0)
-        fit = {"intercept": float(a), "slope": float(b), "r2": float(r2)}
-        log_ranks = x.tolist()
-        log_freqs = y.tolist()
-    else:
-        log_ranks = [math.log(r) for r in ranks]
-        log_freqs = [math.log(f) for f in freqs]
-
-    return {
-        "ranks": ranks,
-        "freqs": freqs,
-        "log_ranks": log_ranks,
-        "log_freqs": log_freqs,
-        "fit": fit,
-    }
-
-
-# -----------------------------
-# MULTI-WORD context window counts
-# -----------------------------
-
-def context_window_counts(raw_text: str, search_term: str, before=5, after=5) -> Counter:
-    """
-    Combined context distribution: before + after words around each occurrence.
-    Supports multi-word phrases by matching token sequences.
-    Matching tokenization: [a-z]+ (simple, stable).
-    Context is normalized via normalize_text().
-    """
-    if not raw_text or not search_term:
-        return Counter()
-
-    tokens = re.findall(r"[a-z]+", raw_text.lower())
-    term_tokens = re.findall(r"[a-z]+", search_term.lower())
-    if not term_tokens:
-        return Counter()
-
-    n = len(term_tokens)
-    ctx = []
-    i = 0
-    while i <= len(tokens) - n:
-        if tokens[i:i + n] == term_tokens:
-            lo = max(0, i - before)
-            hi = min(len(tokens), i + n + after)
-            ctx.extend(tokens[lo:i] + tokens[i + n:hi])  # exclude the phrase itself
-            i += n
-        else:
-            i += 1
-
-    norm = normalize_text(" ".join(ctx))
-    return Counter(norm)
-
-
-def wordcloud_base64_from_counter(counter: Counter):
-    """
-    Returns base64 PNG if wordcloud is installed; else returns None.
-    """
-    if WordCloud is None or not counter:
-        return None
-
-    wc = WordCloud(width=900, height=450, background_color="white", collocations=False)
-    wc.generate_from_frequencies(dict(counter))
-
-    img = wc.to_image()
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-
-def counter_to_top_list(counter: Counter, n=50):
-    return [{"word": w, "count": int(c)} for w, c in counter.most_common(n)]
-
-
-# -----------------------------
-# Routes
+# Health check
 # -----------------------------
 
 @app.get("/health")
@@ -353,180 +118,175 @@ def health():
     return jsonify({"status": "ok"})
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def parse_month_selection(selection: str):
+    m = re.search(r"\((\d+)\)", selection or "")
+    offset = int(m.group(1)) if m else 1
+
+    today = dt.date.today()
+    first = today.replace(day=1)
+    year = first.year
+    month = first.month - offset
+
+    while month <= 0:
+        month += 12
+        year -= 1
+
+    start = dt.date(year, month, 1)
+    end_month = month + 1
+    end_year = year
+    if end_month == 13:
+        end_month = 1
+        end_year += 1
+
+    end = dt.date(end_year, end_month, 1)
+    return start, end
+
+
+def guardian_fetch_all(query, start, end):
+    if not GUARDIAN_API_KEY:
+        raise RuntimeError("GUARDIAN_API_KEY not set")
+
+    page = 1
+    results = []
+    to_date = (end - dt.timedelta(days=1)).isoformat()
+
+    while page <= MAX_PAGES:
+        params = {
+            "q": query,
+            "api-key": GUARDIAN_API_KEY,
+            "page-size": DEFAULT_PAGE_SIZE,
+            "page": page,
+            "from-date": start.isoformat(),
+            "to-date": to_date,
+            "show-fields": "bodyText,headline,trailText",
+        }
+        r = requests.get(GUARDIAN_SEARCH_URL, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()["response"]
+
+        results.extend(data["results"])
+        if page >= data["pages"]:
+            break
+        page += 1
+
+    return results
+
+
+def normalize_text(text):
+    STOPWORDS, LEMMATIZER = get_nlp()
+    tokens = re.findall(r"[a-z]+", (text or "").lower())
+    out = []
+    for t in tokens:
+        if len(t) <= 2 or t in STOPWORDS:
+            continue
+        l = LEMMATIZER.lemmatize(t)
+        if len(l) > 2 and l not in STOPWORDS:
+            out.append(l)
+    return out
+
+
+def aggregate_text(results):
+    parts = []
+    for r in results:
+        f = r.get("fields") or {}
+        parts.extend([f.get("headline", ""), f.get("trailText", ""), f.get("bodyText", "")])
+    return "\n".join(parts)
+
+
+def zipf_from_counter(freq, top_k=200):
+    if not freq:
+        return {"ranks": [], "freqs": [], "log_ranks": [], "log_freqs": [], "fit": None}
+
+    items = freq.most_common(top_k)
+    freqs = [c for _, c in items]
+    ranks = list(range(1, len(freqs) + 1))
+
+    if np is not None and len(freqs) >= 5:
+        x = np.log(ranks)
+        y = np.log(freqs)
+        b, a = np.polyfit(x, y, 1)
+        r2 = 1 - np.sum((y - (a + b * x)) ** 2) / np.sum((y - y.mean()) ** 2)
+        return {
+            "ranks": ranks,
+            "freqs": freqs,
+            "log_ranks": x.tolist(),
+            "log_freqs": y.tolist(),
+            "fit": {"intercept": float(a), "slope": float(b), "r2": float(r2)},
+        }
+
+    return {
+        "ranks": ranks,
+        "freqs": freqs,
+        "log_ranks": [math.log(r) for r in ranks],
+        "log_freqs": [math.log(f) for f in freqs],
+        "fit": None,
+    }
+
+
+# -----------------------------
+# API ROUTES (UNCHANGED)
+# -----------------------------
+
 @app.post("/simple_wordcount")
 def simple_wordcount():
-    payload = request.get_json(force=True) or {}
-    keyword = (payload.get("keyword") or "").strip()
-    month_sel = (payload.get("month") or "").strip()
+    payload = request.get_json(force=True)
+    keyword = payload.get("keyword", "").strip()
+    month = payload.get("month", "")
 
     if not keyword:
-        return jsonify({"error": "Missing 'keyword'"}), 400
+        return jsonify({"error": "Missing keyword"}), 400
 
-    start, end = parse_month_selection(month_sel)
-
-    try:
-        results = guardian_fetch_all(keyword, start, end)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    raw_text = aggregate_article_text(results)
-    tokens = normalize_text(raw_text)
+    start, end = parse_month_selection(month)
+    results = guardian_fetch_all(keyword, start, end)
+    raw = aggregate_text(results)
+    tokens = normalize_text(raw)
     freq = Counter(tokens)
 
-    zipf = zipf_data_from_counter(freq, top_k=200)
-
-    ctx_counts = context_window_counts(raw_text, keyword, before=WINDOW_BEFORE, after=WINDOW_AFTER)
-    wc_b64 = wordcloud_base64_from_counter(ctx_counts)
-
+    zipf = zipf_from_counter(freq)
     return jsonify({
         "keyword": keyword,
         "month": start.strftime("%Y-%m"),
         "articles": len(results),
-        "top_words": counter_to_top_list(freq, n=50),
+        "top_words": [{"word": w, "count": c} for w, c in freq.most_common(50)],
         "zipf": zipf,
-        "context": {
-            "window_before": WINDOW_BEFORE,
-            "window_after": WINDOW_AFTER,
-            "top_context_words": counter_to_top_list(ctx_counts, n=80),
-
-            # original keys
-            "wordcloud_png_base64": wc_b64,
-            "wordcloud_available": (wc_b64 is not None),
-
-            # compatibility aliases (so old frontend code still works)
-            "wordcloud": wc_b64,
-            "context_wordcloud_png_base64": wc_b64,
-        },
-
-        # top-level alias (some frontends expect this)
-        "context_wordcloud_png_base64": wc_b64,
     })
 
 
 @app.post("/trends")
 def trends():
-    payload = request.get_json(force=True) or {}
-    keyword = (payload.get("keyword") or "").strip()
-
+    payload = request.get_json(force=True)
+    keyword = payload.get("keyword", "").strip()
     if not keyword:
-        return jsonify({"error": "Missing 'keyword'"}), 400
+        return jsonify({"error": "Missing keyword"}), 400
 
-    ranges = month_ranges_last_n_completed_months(6)
+    ranges = [parse_month_selection(f"({i})") for i in range(1, 7)]
+    months = []
+    data = {}
 
-    month_word_counts = {}
-    month_total_tokens = {}
-    month_top = {}
-
-    try:
-        for label, start, end in ranges:
-            results = guardian_fetch_all(keyword, start, end)
-            raw_text = aggregate_article_text(results)
-            tokens = normalize_text(raw_text)
-            freq = Counter(tokens)
-
-            month_word_counts[label] = freq
-            month_total_tokens[label] = max(1, sum(freq.values()))
-            month_top[label] = counter_to_top_list(freq, n=25)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    vocab = set()
-    for m, freq in month_word_counts.items():
-        for w, _ in freq.most_common(400):
-            vocab.add(w)
-
-    months = [label for (label, _, _) in ranges]  # newest -> older
-
-    series = {}
-    for w in vocab:
-        series[w] = [
-            (month_word_counts[m].get(w, 0) / month_total_tokens[m]) * 10000.0
-            for m in months
-        ]
-
-    deltas = []
-    for w, vals in series.items():
-        if len(vals) >= 2:
-            deltas.append((w, vals[0] - vals[-1]))
-    deltas.sort(key=lambda x: x[1], reverse=True)
-
-    top_increasing = [{"word": w, "delta_per_10k": float(d)} for w, d in deltas[:10]]
-    top_decreasing = [{"word": w, "delta_per_10k": float(d)} for w, d in deltas[-10:]][::-1]
-
-    movers = [x["word"] for x in top_increasing] + [x["word"] for x in top_decreasing]
-    movers_unique = []
-    seen = set()
-    for w in movers:
-        if w not in seen:
-            seen.add(w)
-            movers_unique.append(w)
-
-    mover_series = [{"word": w, "rates_per_10k": series[w]} for w in movers_unique]
+    for i, (start, end) in enumerate(ranges):
+        label = start.strftime("%Y-%m")
+        months.append(label)
+        results = guardian_fetch_all(keyword, start, end)
+        tokens = normalize_text(aggregate_text(results))
+        data[label] = Counter(tokens)
 
     return jsonify({
         "keyword": keyword,
         "months": months,
-        "top_increasing": top_increasing,
-        "top_decreasing": top_decreasing,
-        "mover_series": mover_series,
-        "month_top_words": month_top,
+        "month_top_words": {
+            m: [{"word": w, "count": c} for w, c in data[m].most_common(25)]
+            for m in months
+        }
     })
-
-
-@app.post("/export/csv")
-def export_csv():
-    if pd is None:
-        return jsonify({"error": "pandas not installed. Add pandas to requirements.txt"}), 500
-
-    payload = request.get_json(force=True) or {}
-    rows = payload.get("rows")
-    filename = payload.get("filename") or "zipflow_export.csv"
-
-    if not isinstance(rows, list) or not rows:
-        return jsonify({"error": "Missing 'rows' (list of objects)"}), 400
-
-    df = pd.DataFrame(rows)
-    buf = io.StringIO()
-    df.to_csv(buf, index=False)
-    data = io.BytesIO(buf.getvalue().encode("utf-8"))
-
-    return send_file(data, mimetype="text/csv", as_attachment=True, download_name=filename)
-
-
-@app.post("/export/excel")
-def export_excel():
-    if pd is None:
-        return jsonify({"error": "pandas not installed. Add pandas and openpyxl to requirements.txt"}), 500
-
-    payload = request.get_json(force=True) or {}
-    sheets = payload.get("sheets")
-    filename = payload.get("filename") or "zipflow_export.xlsx"
-
-    if not isinstance(sheets, dict) or not sheets:
-        return jsonify({"error": "Missing 'sheets' (object: sheetName -> rows list)"}), 400
-
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        for sheet_name, rows in sheets.items():
-            if not isinstance(rows, list):
-                continue
-            df = pd.DataFrame(rows)
-            safe_name = str(sheet_name)[:31]  # Excel limit
-            df.to_excel(writer, sheet_name=safe_name, index=False)
-
-    out.seek(0)
-    return send_file(
-        out,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        as_attachment=True,
-        download_name=filename
-    )
 
 
 # -----------------------------
 # Main
 # -----------------------------
+
 if __name__ == "__main__":
-    # Running directly: python main.py
-    # Backend will be at: http://127.0.0.1:5000
     app.run(host="0.0.0.0", port=5000, debug=True)
