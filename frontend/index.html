@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Word Analysis (Zipf Law)</title>
+
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; margin: 24px; }
+    h1 { margin-bottom: 8px; }
+
+    label { font-weight: 600; display: inline-block; margin-top: 10px; }
+    input, select { padding: 6px 8px; margin-top: 6px; width: 320px; max-width: 95vw; }
+
+    button { padding: 8px 10px; margin-top: 12px; margin-right: 8px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: default; }
+
+    .error { color: #b00020; font-weight: 600; margin-top: 10px; display:none; }
+    .status { color: #0b5; font-weight: 600; margin-top: 10px; display:none; }
+
+    .section { margin-top: 22px; }
+    .divider { margin: 24px 0; border-top: 1px solid #ccc; }
+
+    /* Core layout */
+    .row {
+      display: flex;
+      gap: 18px;
+      align-items: stretch;
+      flex-wrap: wrap;
+    }
+
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 12px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 280px;
+    }
+
+    .cardFill { flex: 1; display: flex; flex-direction: column; }
+
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+    th { background: #f6f6f6; }
+
+    .small { font-size: 12px; color: #555; }
+
+    /* ✅ (1) colourful word cloud */
+    #contextWordcloudImg { filter: none; }
+
+    /* ✅ (3) Make Top Words table “taller” so it visually matches right column height */
+    /* Increase row height + let it stretch */
+    .topWordsTable th, .topWordsTable td { padding: 5px 8px; line-height: 1.15; }
+    #topWords { flex: 1; }
+    #topWords table { height: 100%; }
+    #topWords tbody tr { height: 20px; } /* 30 rows ≈ 600px */
+
+    /* Sparklines */
+    .sparklineRow { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .sparkLabel { width: 140px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sparkCanvas { border: 1px solid #eee; border-radius: 6px; }
+    .sparkValue { font-size: 12px; color: #555; margin-left: auto; }
+
+    /* Trend analysis layout */
+    .trendLayout {
+      display: flex;
+      gap: 18px;
+      align-items: stretch;
+      flex-wrap: wrap;
+    }
+
+    .trendLeft {
+      flex: 2;
+      min-width: 360px;
+      display: flex;
+    }
+
+    .trendRight {
+      flex: 1;
+      min-width: 320px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .trendLeft .card { width: 100%; }
+    .trendRight .card { flex: 1; }
+
+    /* Keep top inc/dec tables compact so they fit alongside heatmap */
+    .miniTable th, .miniTable td { padding: 3px 6px; line-height: 1.1; font-size: 12px; }
+  </style>
+</head>
+
+<body>
+  <h1>Word Analysis (Zipf Law)</h1>
+
+  <label>Keyword or Company Name</label><br>
+  <input id="keyword" value="European Union">
+
+  <br><br>
+  <label>Month</label><br>
+  <select id="month">
+    <option>Last month (1)</option>
+    <option>2 months ago (2)</option>
+    <option>3 months ago (3)</option>
+    <option>4 months ago (4)</option>
+    <option>5 months ago (5)</option>
+    <option>6 months ago (6)</option>
+  </select>
+
+  <br><br>
+  <button id="btnSimple">Simple Word Count</button>
+  <button id="btnTrends">6-Month Trend Analysis</button>
+
+  <div id="statusBox" class="status"></div>
+  <div id="errorBox" class="error"></div>
+
+  <div class="divider"></div>
+
+  <!-- ================= SIMPLE WORD COUNT ================= -->
+
+  <div class="section">
+    <h2>Simple Word Count</h2>
+    <div class="small" id="simpleMeta"></div>
+
+    <div class="row">
+      <!-- Left: Top words -->
+      <div class="card">
+        <h3>Top Words (Top 30)</h3>
+        <div class="cardFill" id="topWords"></div>
+      </div>
+
+      <!-- Right: Zipf + Wordcloud -->
+      <div class="card">
+        <h3>Zipf Law</h3>
+        <div class="small" id="zipfFit"></div>
+        <canvas id="zipfCanvas" width="640" height="300" style="max-width:100%; border:1px solid #eee; border-radius:6px;"></canvas>
+
+        <div id="contextWordcloudWrap" style="margin-top:12px; display:none;">
+          <h4 style="margin: 10px 0 6px;">Context Word Cloud</h4>
+          <div class="small" id="contextMeta"></div>
+          <img id="contextWordcloudImg" style="width:100%; border:1px solid #ddd; border-radius:8px; padding:6px;" alt="Context word cloud">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ================= TREND ANALYSIS ================= -->
+
+  <div class="section">
+    <h2>6-Month Trend Analysis</h2>
+    <div class="small" id="trendMeta"></div>
+
+    <div class="trendLayout">
+      <!-- Left: Heatmap -->
+      <div class="trendLeft">
+        <div class="card">
+          <h3 style="margin: 6px 0;">Mover Series (Heatmap)</h3>
+          <div class="small">Green = increase vs previous month, Red = decrease vs previous month. Intensity scales with magnitude.</div>
+          <div id="moverSeries" class="cardFill"></div>
+        </div>
+      </div>
+
+      <!-- Right: Put back Top Increasing/Decreasing tables + sparklines (as before) -->
+      <div class="trendRight">
+        <div class="card">
+          <h3 style="margin: 6px 0;">Top Increasing</h3>
+          <div id="topIncreasing"></div>
+
+          <h3 style="margin: 14px 0 6px;">Trend lines (top increasing)</h3>
+          <div class="small">Rates per 10k tokens (oldest → newest)</div>
+          <div id="topIncreasingSparks"></div>
+        </div>
+
+        <div class="card">
+          <h3 style="margin: 6px 0;">Top Decreasing</h3>
+          <div id="topDecreasing"></div>
+
+          <h3 style="margin: 14px 0 6px;">Trend lines (top decreasing)</h3>
+          <div class="small">Rates per 10k tokens (oldest → newest)</div>
+          <div id="topDecreasingSparks"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = "http://127.0.0.1:5000";
+    const el = (id) => document.getElementById(id);
+
+    function showError(msg) {
+      const box = el("errorBox");
+      if (!msg) {
+        box.style.display = "none";
+        box.textContent = "";
+        return;
+      }
+      box.style.display = "block";
+      box.textContent = msg;
+    }
+
+    function setWorking(isWorking, msg) {
+      const s = el("statusBox");
+      const b1 = el("btnSimple");
+      const b2 = el("btnTrends");
+
+      if (isWorking) {
+        s.style.display = "block";
+        s.textContent = msg || "Working...";
+        b1.disabled = true;
+        b2.disabled = true;
+      } else {
+        s.style.display = "none";
+        s.textContent = "";
+        b1.disabled = false;
+        b2.disabled = false;
+      }
+    }
+
+    function asTable(rows, headers, tableClass="") {
+      if (!rows || !rows.length) return "<div class='small'>No data</div>";
+      const thead = "<tr>" + headers.map(h => `<th>${h}</th>`).join("") + "</tr>";
+      const tbody = rows.map(r => "<tr>" + headers.map(h => `<td>${r[h] ?? ""}</td>`).join("") + "</tr>").join("");
+      return `<table class="${tableClass}"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
+    }
+
+    function renderTopWords(topWords) {
+      if (!topWords || !topWords.length) {
+        el("topWords").innerHTML = "<div class='small'>No words returned</div>";
+        return;
+      }
+      const rows = topWords.slice(0, 30).map(x => ({ word: x.word, count: x.count }));
+      el("topWords").innerHTML = asTable(rows, ["word", "count"], "topWordsTable");
+    }
+
+    function renderMoversList(list, containerId) {
+      const container = el(containerId);
+      if (!list || !list.length) {
+        container.innerHTML = "<div class='small'>No data</div>";
+        return;
+      }
+      const rows = list.map(x => ({
+        word: x.word,
+        delta_per_10k: (typeof x.delta_per_10k === "number" ? x.delta_per_10k.toFixed(2) : x.delta_per_10k)
+      }));
+      container.innerHTML = asTable(rows, ["word", "delta_per_10k"], "miniTable");
+    }
+
+    function drawZipf(zipf) {
+      const canvas = el("zipfCanvas");
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (!zipf || !zipf.log_ranks || !zipf.log_freqs || zipf.log_ranks.length < 2) {
+        ctx.fillText("No Zipf data", 10, 20);
+        el("zipfFit").textContent = "";
+        return;
+      }
+
+      const x = zipf.log_ranks;
+      const y = zipf.log_freqs;
+
+      const pad = 40;
+      const w = canvas.width - pad * 2;
+      const h = canvas.height - pad * 2;
+
+      const xmin = Math.min(...x), xmax = Math.max(...x);
+      const ymin = Math.min(...y), ymax = Math.max(...y);
+
+      const X = (v) => pad + (v - xmin) / (xmax - xmin) * w;
+      const Y = (v) => pad + (ymax - v) / (ymax - ymin) * h;
+
+      // Axis baseline blue
+      ctx.strokeStyle = "#1e5eff";
+      ctx.beginPath();
+      ctx.moveTo(pad, pad);
+      ctx.lineTo(pad, pad + h);
+      ctx.lineTo(pad + w, pad + h);
+      ctx.stroke();
+
+      // datapoint dots red
+      ctx.fillStyle = "#d11f1f";
+      for (let i = 0; i < x.length; i++) {
+        const px = X(x[i]);
+        const py = Y(y[i]);
+        ctx.beginPath();
+        ctx.arc(px, py, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Fit line
+      if (zipf.fit && typeof zipf.fit.intercept === "number" && typeof zipf.fit.slope === "number") {
+        const a = zipf.fit.intercept;
+        const b = zipf.fit.slope;
+
+        const x1 = xmin, x2 = xmax;
+        const y1 = a + b * x1;
+        const y2 = a + b * x2;
+
+        ctx.strokeStyle = "#444";
+        ctx.beginPath();
+        ctx.moveTo(X(x1), Y(y1));
+        ctx.lineTo(X(x2), Y(y2));
+        ctx.stroke();
+
+        el("zipfFit").textContent = `fit: log(freq)=a+b*log(rank), slope=${b.toFixed(3)}, r2=${(zipf.fit.r2 ?? 0).toFixed(3)}`;
+      } else {
+        el("zipfFit").textContent = "fit: not available";
+      }
+    }
+
+    async function runSimpleWordCount() {
+      showError("");
+      setWorking(true, "Working on Simple Word Count...");
+
+      const keyword = el("keyword").value.trim();
+      const month = el("month").value;
+
+      if (!keyword) {
+        showError("Please enter a keyword.");
+        setWorking(false);
+        return;
+      }
+
+      try {
+        const resp = await fetch(`${API_BASE}/simple_wordcount`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword, month })
+        });
+
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+
+        el("simpleMeta").textContent = `Keyword: ${data.keyword} | Month: ${data.month} | Articles: ${data.articles}`;
+        renderTopWords(data.top_words);
+        drawZipf(data.zipf);
+
+        const ctx = data.context || {};
+        const wcWrap = el("contextWordcloudWrap");
+        const wcImg  = el("contextWordcloudImg");
+        const ctxMeta = el("contextMeta");
+
+        const b64 =
+          (ctx.wordcloud_png_base64 || ctx.wordcloud || ctx.context_wordcloud_png_base64) ||
+          data.context_wordcloud_png_base64;
+
+        if (b64) {
+          wcImg.src = "data:image/png;base64," + b64;
+          wcWrap.style.display = "block";
+          ctxMeta.textContent = `Window: ${(ctx.window_before ?? 5)} before + ${(ctx.window_after ?? 5)} after`;
+        } else {
+          wcWrap.style.display = "none";
+          ctxMeta.textContent = "";
+        }
+
+      } catch (err) {
+        showError(`Error fetching simple word count: ${err.message || err}`);
+      } finally {
+        setWorking(false);
+      }
+    }
+
+    function drawSparkline(canvas, values) {
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      if (!values || values.length < 2) { ctx.fillText("n/a", 6, 14); return; }
+
+      const ys = values.filter(v => typeof v === "number" && !Number.isNaN(v));
+      if (ys.length < 2) { ctx.fillText("n/a", 6, 14); return; }
+
+      const ymin = Math.min(...ys), ymax = Math.max(...ys);
+      const pad = 6;
+      const X = (i) => pad + (i / (values.length - 1)) * (w - pad * 2);
+      const Y = (v) => (ymax === ymin) ? h / 2 : pad + (ymax - v) / (ymax - ymin) * (h - pad * 2);
+
+      ctx.strokeStyle = "#eee";
+      ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+
+      ctx.strokeStyle = "#222";
+      ctx.beginPath();
+      for (let i = 0; i < values.length; i++) {
+        const v = (typeof values[i] === "number") ? values[i] : 0;
+        if (i === 0) ctx.moveTo(X(i), Y(v));
+        else ctx.lineTo(X(i), Y(v));
+      }
+      ctx.stroke();
+
+      ctx.fillStyle = "#222";
+      const last = (typeof values[values.length - 1] === "number") ? values[values.length - 1] : 0;
+      ctx.beginPath();
+      ctx.arc(X(values.length - 1), Y(last), 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function renderSparklines(containerId, words, wordToSeries) {
+      const container = el(containerId);
+      if (!words || !words.length) { container.innerHTML = "<div class='small'>No data</div>"; return; }
+
+      container.innerHTML = words.map((w, idx) => {
+        const safeId = `${containerId}_c_${idx}`;
+        return `
+          <div class="sparklineRow">
+            <div class="sparkLabel" title="${w}">${w}</div>
+            <canvas class="sparkCanvas" id="${safeId}" width="220" height="36"></canvas>
+            <div class="sparkValue" id="${safeId}_v"></div>
+          </div>`;
+      }).join("");
+
+      words.forEach((w, idx) => {
+        const canvas = el(`${containerId}_c_${idx}`);
+        const vEl = el(`${containerId}_c_${idx}_v`);
+        const series = wordToSeries[w] || [];
+        drawSparkline(canvas, series);
+        const last = series.length ? series[series.length - 1] : null;
+        vEl.textContent = (typeof last === "number") ? last.toFixed(2) : "";
+      });
+    }
+
+    // Green/red directional heatmap based on month-to-month change; intensity by change magnitude
+    function renderMoverSeriesHeatmap(months, series) {
+      if (!series || !series.length) { el("moverSeries").innerHTML = "<div class='small'>No series data</div>"; return; }
+      if (!months || !months.length) { el("moverSeries").innerHTML = "<div class='small'>No months returned</div>"; return; }
+
+      const orderedMonthsAll = months.slice().sort(); // oldest -> newest
+      const startMonth = "2025-07";
+      const startIdx = orderedMonthsAll.indexOf(startMonth);
+      const orderedMonths = (startIdx >= 0) ? orderedMonthsAll.slice(startIdx) : orderedMonthsAll;
+
+      const rows = series.map(s => {
+        const rates = s.rates_per_10k || [];
+        const m2v = {};
+        for (let i = 0; i < months.length; i++) m2v[months[i]] = rates[i];
+        return { word: s.word, _m2v: m2v };
+      });
+
+      const absDeltas = [];
+      rows.forEach(r => {
+        for (let j = 1; j < orderedMonths.length; j++) {
+          const m = orderedMonths[j];
+          const pm = orderedMonths[j - 1];
+          const v = r._m2v[m];
+          const pv = r._m2v[pm];
+          if (typeof v === "number" && typeof pv === "number") absDeltas.push(Math.abs(v - pv));
+        }
+      });
+      const dmax = absDeltas.length ? Math.max(...absDeltas) : 1;
+
+      let html = "<table><thead><tr><th>word</th>";
+      html += orderedMonths.map(m => `<th>${m}</th>`).join("");
+      html += "</tr></thead><tbody>";
+
+      rows.forEach(r => {
+        html += `<tr><td>${r.word}</td>`;
+        orderedMonths.forEach((m, j) => {
+          const v = r._m2v[m];
+          const pm = (j > 0) ? orderedMonths[j - 1] : null;
+          const pv = pm ? r._m2v[pm] : null;
+
+          let bg = "rgba(0,0,0,0.02)";
+          if (typeof v === "number" && typeof pv === "number") {
+            const d = v - pv;
+            const t = dmax ? (Math.abs(d) / dmax) : 0;
+            const alpha = 0.06 + t * 0.45;
+
+            if (d > 0) bg = `rgba(0, 170, 80, ${alpha})`;
+            else if (d < 0) bg = `rgba(210, 40, 40, ${alpha})`;
+            else bg = `rgba(0,0,0,0.04)`;
+          }
+
+          const txt = (typeof v === "number") ? v.toFixed(2) : "";
+          html += `<td style="background:${bg}">${txt}</td>`;
+        });
+        html += "</tr>";
+      });
+
+      html += "</tbody></table>";
+      el("moverSeries").innerHTML = html;
+    }
+
+    async function runTrends() {
+      showError("");
+      setWorking(true, "Working on 6-Month Trend Analysis...");
+
+      const keyword = el("keyword").value.trim();
+      if (!keyword) { showError("Please enter a keyword."); setWorking(false); return; }
+
+      try {
+        const resp = await fetch(`${API_BASE}/trends`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword })
+        });
+
+        if (!resp.ok) throw new Error(await resp.text());
+        const data = await resp.json();
+
+        const monthsRaw = Array.isArray(data.months) ? data.months : [];
+        const orderedMonthsAll = monthsRaw.slice().sort();
+        const startMonth = "2025-07";
+        const startIdx = orderedMonthsAll.indexOf(startMonth);
+        const orderedMonths = (startIdx >= 0) ? orderedMonthsAll.slice(startIdx) : orderedMonthsAll;
+
+        el("trendMeta").textContent = `Keyword: ${data.keyword} | Months (oldest→newest): ${orderedMonths.join(", ")}`;
+
+        // ✅ Put back the Top Increasing/Decreasing tables
+        renderMoversList(data.top_increasing || [], "topIncreasing");
+        renderMoversList(data.top_decreasing || [], "topDecreasing");
+
+        const moverSeries = Array.isArray(data.mover_series) ? data.mover_series : [];
+        const wordToSeries = {};
+        moverSeries.forEach(s => {
+          const rates = s.rates_per_10k || [];
+          const m2v = {};
+          for (let i = 0; i < monthsRaw.length; i++) m2v[monthsRaw[i]] = rates[i];
+          wordToSeries[s.word] = orderedMonths.map(m => m2v[m]);
+        });
+
+        const incWords = (data.top_increasing || []).map(x => x.word);
+        const decWords = (data.top_decreasing || []).map(x => x.word);
+
+        renderSparklines("topIncreasingSparks", incWords, wordToSeries);
+        renderSparklines("topDecreasingSparks", decWords, wordToSeries);
+        renderMoverSeriesHeatmap(monthsRaw, moverSeries);
+
+      } catch (err) {
+        showError(`Error fetching trends: ${err.message || err}`);
+      } finally {
+        setWorking(false);
+      }
+    }
+
+    el("btnSimple").addEventListener("click", runSimpleWordCount);
+    el("btnTrends").addEventListener("click", runTrends);
+  </script>
+</body>
+</html>
