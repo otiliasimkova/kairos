@@ -77,6 +77,13 @@ LEMMATIZER = WordNetLemmatizer()
 # -----------------------------
 
 app = Flask(__name__)
+
+from flask import send_from_directory
+
+@app.route("/")
+def home():
+    return send_from_directory("frontend", "index.html")
+
 CORS(app)  # allow browser fetch from file:// or localhost
 
 
