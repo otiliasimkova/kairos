@@ -7,4 +7,5 @@ python-dotenv
 nltk
 numpy
 
+flask
 gunicorn
