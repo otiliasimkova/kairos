@@ -7,7 +7,7 @@ import datetime as dt
 from collections import Counter
 
 import requests
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 
 # Optional exports
@@ -38,7 +38,8 @@ except Exception:
 # Configuration
 # -----------------------------
 
-GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY", "fb8f2423-edf4-4824-9ae5-0f4310802dae")
+# IMPORTANT: do NOT hardcode the key in code. Set in Render Environment as GUARDIAN_API_KEY.
+GUARDIAN_API_KEY = os.getenv("GUARDIAN_API_KEY")
 GUARDIAN_SEARCH_URL = "https://content.guardianapis.com/search"
 
 DEFAULT_PAGE_SIZE = 200
@@ -49,27 +50,47 @@ WINDOW_AFTER = 5
 
 
 # -----------------------------
-# NLTK setup (kept lightweight)
+# NLTK setup (lazy + production-safe)
 # -----------------------------
 
+_NLTK_READY = False
+_STOPWORDS = None
+_LEMMATIZER = None
+
+
 def ensure_nltk():
+    """
+    Ensure required NLTK corpora are available.
+    NOTE: Downloading at runtime can be slow/unreliable on some hosts.
+    We run this lazily (only when text processing is requested).
+    """
+    global _NLTK_READY, _STOPWORDS, _LEMMATIZER
+    if _NLTK_READY and _STOPWORDS is not None and _LEMMATIZER is not None:
+        return
+
     try:
         nltk.data.find("corpora/stopwords")
     except LookupError:
-        nltk.download("stopwords")
+        nltk.download("stopwords", quiet=True)
+
     try:
         nltk.data.find("corpora/wordnet")
     except LookupError:
-        nltk.download("wordnet")
+        nltk.download("wordnet", quiet=True)
+
     try:
         nltk.data.find("corpora/omw-1.4")
     except LookupError:
-        nltk.download("omw-1.4")
+        nltk.download("omw-1.4", quiet=True)
+
+    _STOPWORDS = set(stopwords.words("english"))
+    _LEMMATIZER = WordNetLemmatizer()
+    _NLTK_READY = True
 
 
-ensure_nltk()
-STOPWORDS = set(stopwords.words("english"))
-LEMMATIZER = WordNetLemmatizer()
+def get_stopwords_and_lemmatizer():
+    ensure_nltk()
+    return _STOPWORDS, _LEMMATIZER
 
 
 # -----------------------------
@@ -77,14 +98,19 @@ LEMMATIZER = WordNetLemmatizer()
 # -----------------------------
 
 app = Flask(__name__)
+CORS(app)  # allow browser fetch (also useful if frontend is separate)
 
-from flask import send_from_directory
 
+# Serve the frontend (so / doesn't 404 on Render)
 @app.route("/")
 def home():
     return send_from_directory("frontend", "index.html")
 
-CORS(app)  # allow browser fetch from file:// or localhost
+
+# Serve frontend assets (css/js/images referenced by index.html)
+@app.route("/<path:path>")
+def frontend_files(path):
+    return send_from_directory("frontend", path)
 
 
 # -----------------------------
@@ -145,7 +171,9 @@ def guardian_fetch_all(query: str, from_date: dt.date, to_date: dt.date):
     returning list of results with fields.
     """
     if not GUARDIAN_API_KEY or GUARDIAN_API_KEY.strip() == "":
-        raise ValueError("Missing GUARDIAN_API_KEY (set env var or hardcode).")
+        raise ValueError(
+            "Missing GUARDIAN_API_KEY. Set it in your hosting environment (Render -> Environment)."
+        )
 
     all_results = []
     page = 1
@@ -190,6 +218,8 @@ def normalize_text(text: str) -> list[str]:
     """
     if not text:
         return []
+
+    STOPWORDS, LEMMATIZER = get_stopwords_and_lemmatizer()
 
     text = text.lower()
     tokens = re.findall(r"[a-z]+", text)
@@ -267,7 +297,7 @@ def context_window_counts(raw_text: str, search_term: str, before=5, after=5) ->
     """
     Combined context distribution: before + after words around each occurrence.
     Supports multi-word phrases by matching token sequences.
-    Matching tokenization: [a-z]+ (simple, stable, same as before).
+    Matching tokenization: [a-z]+ (simple, stable).
     Context is normalized via normalize_text().
     """
     if not raw_text or not search_term:
@@ -333,7 +363,11 @@ def simple_wordcount():
         return jsonify({"error": "Missing 'keyword'"}), 400
 
     start, end = parse_month_selection(month_sel)
-    results = guardian_fetch_all(keyword, start, end)
+
+    try:
+        results = guardian_fetch_all(keyword, start, end)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
     raw_text = aggregate_article_text(results)
     tokens = normalize_text(raw_text)
@@ -383,15 +417,18 @@ def trends():
     month_total_tokens = {}
     month_top = {}
 
-    for label, start, end in ranges:
-        results = guardian_fetch_all(keyword, start, end)
-        raw_text = aggregate_article_text(results)
-        tokens = normalize_text(raw_text)
-        freq = Counter(tokens)
+    try:
+        for label, start, end in ranges:
+            results = guardian_fetch_all(keyword, start, end)
+            raw_text = aggregate_article_text(results)
+            tokens = normalize_text(raw_text)
+            freq = Counter(tokens)
 
-        month_word_counts[label] = freq
-        month_total_tokens[label] = max(1, sum(freq.values()))
-        month_top[label] = counter_to_top_list(freq, n=25)
+            month_word_counts[label] = freq
+            month_total_tokens[label] = max(1, sum(freq.values()))
+            month_top[label] = counter_to_top_list(freq, n=25)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
     vocab = set()
     for m, freq in month_word_counts.items():
@@ -439,7 +476,7 @@ def trends():
 @app.post("/export/csv")
 def export_csv():
     if pd is None:
-        return jsonify({"error": "pandas not installed. Run: pip install pandas"}), 500
+        return jsonify({"error": "pandas not installed. Add pandas to requirements.txt"}), 500
 
     payload = request.get_json(force=True) or {}
     rows = payload.get("rows")
@@ -459,7 +496,7 @@ def export_csv():
 @app.post("/export/excel")
 def export_excel():
     if pd is None:
-        return jsonify({"error": "pandas not installed. Run: pip install pandas openpyxl"}), 500
+        return jsonify({"error": "pandas not installed. Add pandas and openpyxl to requirements.txt"}), 500
 
     payload = request.get_json(force=True) or {}
     sheets = payload.get("sheets")
