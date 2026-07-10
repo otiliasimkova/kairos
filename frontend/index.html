@@ -142,6 +142,7 @@
           <h4 style="margin: 10px 0 6px;">Context Word Cloud</h4>
           <div class="small" id="contextMeta"></div>
           <img id="contextWordcloudImg" style="width:100%; border:1px solid #ddd; border-radius:8px; padding:6px;" alt="Context word cloud">
+          <canvas id="contextWordcloudCanvas" width="640" height="360" style="display:none; width:100%; border:1px solid #ddd; border-radius:8px; padding:6px;"></canvas>
         </div>
       </div>
     </div>
@@ -188,6 +189,7 @@
     </div>
   </div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/wordcloud2.js/1.2.2/wordcloud2.min.js"></script>
   <script>
     const API_BASE = "";
     const el = (id) => document.getElementById(id);
@@ -235,6 +237,47 @@
       }
       const rows = topWords.slice(0, 30).map(x => ({ word: x.word, count: x.count }));
       el("topWords").innerHTML = asTable(rows, ["word", "count"], "topWordsTable");
+    }
+
+    function renderFallbackWordCloud(topWords) {
+      const wcWrap = el("contextWordcloudWrap");
+      const wcImg = el("contextWordcloudImg");
+      const wcCanvas = el("contextWordcloudCanvas");
+      const ctxMeta = el("contextMeta");
+
+      if (!Array.isArray(topWords) || !topWords.length || typeof WordCloud === "undefined") {
+        wcCanvas.style.display = "none";
+        return false;
+      }
+
+      const list = topWords
+        .map(x => [String(x.word || ""), Number(x.count || 0)])
+        .filter(x => x[0] && Number.isFinite(x[1]) && x[1] > 0);
+
+      if (!list.length) {
+        wcCanvas.style.display = "none";
+        return false;
+      }
+
+      wcImg.style.display = "none";
+      wcCanvas.style.display = "block";
+      wcWrap.style.display = "block";
+      ctxMeta.textContent = "Generated from the returned top words";
+
+      WordCloud(wcCanvas, {
+        list,
+        gridSize: 10,
+        weightFactor: function (count) {
+          return Math.max(12, Math.sqrt(count) * 1.5);
+        },
+        fontFamily: "Arial, Helvetica, sans-serif",
+        backgroundColor: "#ffffff",
+        rotateRatio: 0.1,
+        minSize: 10,
+        clearCanvas: true
+      });
+
+      return true;
     }
 
     function renderMoversList(list, containerId) {
@@ -349,11 +392,17 @@
           (ctx.wordcloud_png_base64 || ctx.wordcloud || ctx.context_wordcloud_png_base64) ||
           data.context_wordcloud_png_base64;
 
+        const wcCanvas = el("contextWordcloudCanvas");
+
         if (b64) {
           wcImg.src = "data:image/png;base64," + b64;
+          wcImg.style.display = "block";
+          wcCanvas.style.display = "none";
           wcWrap.style.display = "block";
           ctxMeta.textContent = `Window: ${(ctx.window_before ?? 5)} before + ${(ctx.window_after ?? 5)} after`;
-        } else {
+        } else if (!renderFallbackWordCloud(data.top_words || [])) {
+          wcImg.style.display = "none";
+          wcCanvas.style.display = "none";
           wcWrap.style.display = "none";
           ctxMeta.textContent = "";
         }
@@ -501,7 +550,61 @@
         if (!resp.ok) throw new Error(await resp.text());
         const data = await resp.json();
 
-        const monthsRaw = Array.isArray(data.months) ? data.months : [];
+        let monthsRaw = Array.isArray(data.months) ? data.months : [];
+        let topIncreasing = Array.isArray(data.top_increasing) ? data.top_increasing : [];
+        let topDecreasing = Array.isArray(data.top_decreasing) ? data.top_decreasing : [];
+        let moverSeries = Array.isArray(data.mover_series) ? data.mover_series : [];
+
+        if ((!monthsRaw.length || !moverSeries.length) && data.month_top_words && typeof data.month_top_words === "object") {
+          monthsRaw = Object.keys(data.month_top_words).sort();
+
+          const monthMaps = {};
+          monthsRaw.forEach(month => {
+            monthMaps[month] = {};
+            const rows = Array.isArray(data.month_top_words[month]) ? data.month_top_words[month] : [];
+            rows.forEach(x => {
+              if (x && x.word) monthMaps[month][x.word] = Number(x.count || 0);
+            });
+          });
+
+          const allWords = new Set();
+          monthsRaw.forEach(month => {
+            Object.keys(monthMaps[month]).forEach(word => allWords.add(word));
+          });
+
+          moverSeries = Array.from(allWords).map(word => ({
+            word,
+            rates_per_10k: monthsRaw.map(month => monthMaps[month][word] || 0)
+          }));
+
+          if (monthsRaw.length >= 2) {
+            const firstMonth = monthsRaw[0];
+            const lastMonth = monthsRaw[monthsRaw.length - 1];
+
+            const movers = Array.from(allWords).map(word => ({
+              word,
+              delta_per_10k: (monthMaps[lastMonth][word] || 0) - (monthMaps[firstMonth][word] || 0)
+            }));
+
+            topIncreasing = movers
+              .filter(x => x.delta_per_10k > 0)
+              .sort((a, b) => b.delta_per_10k - a.delta_per_10k)
+              .slice(0, 10);
+
+            topDecreasing = movers
+              .filter(x => x.delta_per_10k < 0)
+              .sort((a, b) => a.delta_per_10k - b.delta_per_10k)
+              .slice(0, 10);
+
+            const selectedWords = new Set([
+              ...topIncreasing.map(x => x.word),
+              ...topDecreasing.map(x => x.word)
+            ]);
+
+            moverSeries = moverSeries.filter(x => selectedWords.has(x.word));
+          }
+        }
+
         const orderedMonthsAll = monthsRaw.slice().sort();
         const startMonth = "2025-07";
         const startIdx = orderedMonthsAll.indexOf(startMonth);
@@ -510,10 +613,9 @@
         el("trendMeta").textContent = `Keyword: ${data.keyword} | Months (oldest→newest): ${orderedMonths.join(", ")}`;
 
         // ✅ Put back the Top Increasing/Decreasing tables
-        renderMoversList(data.top_increasing || [], "topIncreasing");
-        renderMoversList(data.top_decreasing || [], "topDecreasing");
+        renderMoversList(topIncreasing, "topIncreasing");
+        renderMoversList(topDecreasing, "topDecreasing");
 
-        const moverSeries = Array.isArray(data.mover_series) ? data.mover_series : [];
         const wordToSeries = {};
         moverSeries.forEach(s => {
           const rates = s.rates_per_10k || [];
@@ -522,8 +624,8 @@
           wordToSeries[s.word] = orderedMonths.map(m => m2v[m]);
         });
 
-        const incWords = (data.top_increasing || []).map(x => x.word);
-        const decWords = (data.top_decreasing || []).map(x => x.word);
+        const incWords = topIncreasing.map(x => x.word);
+        const decWords = topDecreasing.map(x => x.word);
 
         renderSparklines("topIncreasingSparks", incWords, wordToSeries);
         renderSparklines("topDecreasingSparks", decWords, wordToSeries);
